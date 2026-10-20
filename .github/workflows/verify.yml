@@ -1,0 +1,71 @@
+name: 测试 Windows 便携包
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: 解压、启动和本地同步
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: assembled-packages
+          path: dist
+      - name: 校验发布文件
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($line in Get-Content dist/SHA256SUMS) {
+            $expected, $name = $line -split '  ', 2
+            $actual = (Get-FileHash -LiteralPath (Join-Path dist $name) -Algorithm SHA256).Hash
+            if ($actual -ne $expected) { throw "校验失败：$name" }
+          }
+      - name: 解压并检查启动
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP 'rsync portable 中文'
+          Expand-Archive -LiteralPath dist/rsync-portable-windows-x64.zip -DestinationPath $work
+          $bin = Join-Path $work 'rsync-portable'
+          # 仅允许当前包和 Windows 系统目录，防止借用 runner 自带的工具。
+          $env:PATH = "$bin;$env:SystemRoot\System32;$env:SystemRoot"
+          Remove-Item Env:CYGWIN,Env:CYGWIN_ROOT,Env:RSYNC_RSH -ErrorAction SilentlyContinue
+          & "$bin/rsync.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'rsync 启动失败' }
+          & "$bin/ssh.exe" -V
+          if ($LASTEXITCODE -ne 0) { throw 'SSH 启动失败' }
+      - name: 执行本地同步并比对文件
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP 'rsync portable 中文'
+          $bin = Join-Path $work 'rsync-portable'
+          $env:PATH = "$bin;$env:SystemRoot\System32;$env:SystemRoot"
+          Remove-Item Env:CYGWIN,Env:CYGWIN_ROOT,Env:RSYNC_RSH -ErrorAction SilentlyContinue
+          Push-Location $work
+          try {
+            New-Item -ItemType Directory -Path '同步 source/nested','同步 target' -Force | Out-Null
+            Set-Content -LiteralPath '同步 source/文件 with spaces.txt' -Value 'portable rsync 同步验证' -Encoding utf8
+            Set-Content -LiteralPath '同步 source/nested/example.txt' -Value 'nested file' -Encoding utf8
+            & "$bin/rsync.exe" -av -- './同步 source/' './同步 target/'
+            if ($LASTEXITCODE -ne 0) { throw 'rsync 本地同步失败' }
+            foreach ($relative in @('文件 with spaces.txt','nested/example.txt')) {
+              $source = Get-FileHash -LiteralPath (Join-Path '同步 source' $relative) -Algorithm SHA256
+              $target = Get-FileHash -LiteralPath (Join-Path '同步 target' $relative) -Algorithm SHA256
+              if ($source.Hash -ne $target.Hash) { throw "同步文件内容不一致：$relative" }
+            }
+          } finally {
+            Pop-Location
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsync-portable-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

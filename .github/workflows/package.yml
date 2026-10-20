@@ -2,6 +2,10 @@ name: 打包 Windows rsync
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+      - 'build-*'
 
 permissions:
   contents: read
@@ -29,37 +33,53 @@ jobs:
           compression-level: 0
 
   verify:
-    name: Windows 运行检查与下载产物
+    name: Windows 解压与运行测试
     needs: package
-    runs-on: windows-2022
+    uses: ./.github/workflows/verify.yml
+
+  release:
+    name: 发布 GitHub Release
+    needs: verify
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: assembled-packages
-          path: dist
-      - name: 检查压缩包完整性和程序启动
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          foreach ($line in Get-Content dist/SHA256SUMS) {
-            $expected, $name = $line -split '  ', 2
-            $actual = (Get-FileHash -LiteralPath (Join-Path dist $name) -Algorithm SHA256).Hash
-            if ($actual -ne $expected) { throw "校验失败：$name" }
-          }
-          $work = Join-Path $env:RUNNER_TEMP 'rsync portable'
-          Expand-Archive -LiteralPath dist/rsync-portable-windows-x64.zip -DestinationPath $work
-          $bin = Join-Path $work 'rsync-portable'
-          # 仅在当前步骤为子进程添加 PATH，避免使用 runner 自带的 SSH。
-          $env:PATH = "$bin;$env:SystemRoot\System32;$env:SystemRoot"
-          & "$bin/rsync.exe" --version
-          if ($LASTEXITCODE -ne 0) { throw 'rsync 启动失败' }
-          & "$bin/ssh.exe" -V
-          if ($LASTEXITCODE -ne 0) { throw 'SSH 启动失败' }
-      - uses: actions/upload-artifact@v4
-        with:
           name: rsync-portable-windows-x64
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 30
-          compression-level: 0
+          path: dist
+      - name: 上传便携包、源码与校验文件并发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_EVENT" == "push" ]]; then
+            tag="$RELEASE_REF"
+          else
+            tag="build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          mkdir -p debug
+          cat > debug/tmpfile-AI-release-notes.md <<'EOF'
+          Windows x64 便携版 rsync，已通过压缩包校验和 Windows 基本启动检查。
+
+          - 使用：下载并解压 rsync-portable-windows-x64.zip，保留整个文件夹。
+          - 对应源码：corresponding-sources.zip，包含上游源码包和本次构建材料。
+          - 校验：SHA256SUMS。
+
+          组件的具体版本与校验值见便携包内的 components.lock.json。分发时请同时提供对应源码与许可。
+          EOF
+          # 先作为草稿上传全部附件，完成后再公开发布。
+          gh release create "$tag" \
+            dist/rsync-portable-windows-x64.zip \
+            dist/corresponding-sources.zip \
+            dist/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "Windows rsync $tag" \
+            --notes-file debug/tmpfile-AI-release-notes.md \
+            --draft
+          gh release edit "$tag" --draft=false --latest

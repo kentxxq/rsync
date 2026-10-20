@@ -229,7 +229,7 @@ def main():
     # 与产物匹配的索引、签名和构建模板一并归档，不包含 runner 环境信息。
     for name in ("setup.xz", "setup.xz.sig", "cygwin-pubring.asc"):
         shutil.copyfile(WORK / name, sources / name)
-    for relative in ("scripts/package.py", ".github/workflows/package.yml"):
+    for relative in ("scripts/package.py", ".github/workflows/package.yml", ".github/workflows/verify.yml"):
         target = sources / "template" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
