@@ -1,0 +1,65 @@
+name: 打包 Windows rsync
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: 获取官方组件并打包
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - name: 组装便携包与对应源码
+        run: uv run --python 3.12 scripts/package.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assembled-packages
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  verify:
+    name: Windows 运行检查与下载产物
+    needs: package
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: assembled-packages
+          path: dist
+      - name: 检查压缩包完整性和程序启动
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($line in Get-Content dist/SHA256SUMS) {
+            $expected, $name = $line -split '  ', 2
+            $actual = (Get-FileHash -LiteralPath (Join-Path dist $name) -Algorithm SHA256).Hash
+            if ($actual -ne $expected) { throw "校验失败：$name" }
+          }
+          $work = Join-Path $env:RUNNER_TEMP 'rsync portable'
+          Expand-Archive -LiteralPath dist/rsync-portable-windows-x64.zip -DestinationPath $work
+          $bin = Join-Path $work 'rsync-portable'
+          # 仅在当前步骤为子进程添加 PATH，避免使用 runner 自带的 SSH。
+          $env:PATH = "$bin;$env:SystemRoot\System32;$env:SystemRoot"
+          & "$bin/rsync.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'rsync 启动失败' }
+          & "$bin/ssh.exe" -V
+          if ($LASTEXITCODE -ne 0) { throw 'SSH 启动失败' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsync-portable-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
